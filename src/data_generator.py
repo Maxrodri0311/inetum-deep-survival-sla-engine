@@ -166,6 +166,11 @@ class StochasticDataPhysicsGenerator:
         return records
 
 
+def generate_survival_dataset(n_samples: int = 50000, seed: int = 42) -> pl.DataFrame:
+    """In-memory generator returning a calibrated Polars DataFrame without disk I/O."""
+    return StochasticDataPhysicsGenerator(seed=seed).generate(num_records=n_samples)
+
+
 def generate_domain_dataset(
     num_records: int = 50000,
     output_path: str = "data/raw_dataset.parquet",
