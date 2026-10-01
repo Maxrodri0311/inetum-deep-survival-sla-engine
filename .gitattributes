@@ -6,6 +6,8 @@
 *.sh linguist-vendored=true
 run_demo.* linguist-vendored=true
 Makefile linguist-vendored=true
+scripts/* linguist-vendored=true
+tests/* linguist-detectable=true
 
 # Force explicit detection of core polyglot engineering layers
 analytics/queries/*.sql linguist-detectable=true

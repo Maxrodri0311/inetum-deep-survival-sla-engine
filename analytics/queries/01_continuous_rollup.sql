@@ -1,70 +1,83 @@
 -- ==============================================================================
--- Inetum Analytical Lakehouse - Continuous Statistical Rollup Mart
--- Target: PostgreSQL 16 Materialized Views & Statistical Windowing
--- Role: Senior Data Scientist
--- Features: LAG Velocity, Moving Z-Scores, Decile Segmentation & Concurrent Refresh
+-- Inetum SLA Telemetry - Continuous Rollup & Materialized Aggregations
+-- Target: PostgreSQL 16 Enterprise / Amazon RDS Aurora
+-- Architecture: Materialized Views with Window Moving Averages & Hazard Ratios
 -- ==============================================================================
 
-SET search_path TO analytical_lakehouse, public;
+SET search_path TO inetum_sla_lakehouse, public;
 
-DROP MATERIALIZED VIEW IF EXISTS mv_inetum_senior_data_scientist_bridge_project_continuous_rollup CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS mv_sla_continuous_risk_rollup CASCADE;
 
-CREATE MATERIALIZED VIEW mv_inetum_senior_data_scientist_bridge_project_continuous_rollup AS
-WITH daily_entity_slices AS (
+CREATE MATERIALIZED VIEW mv_sla_continuous_risk_rollup AS
+WITH telemetry_windowed AS (
     SELECT
-        entity_id,
-        domain_cluster,
-        DATE_TRUNC('day', event_timestamp) AS observation_day,
-        COUNT(*) AS total_events_logged,
-        MAX(created_at) AS latest_event_at
-    FROM inetum_senior_data_scientist_bridge_project_telemetry
-    GROUP BY entity_id, domain_cluster, DATE_TRUNC('day', event_timestamp)
+        t.contract_id,
+        m.client_tier,
+        m.workload_type,
+        t.ticket_severity,
+        t.system_load_ratio,
+        t.duration_hours,
+        t.event_occurred,
+        t.event_timestamp,
+        DATE_TRUNC('day', t.event_timestamp) AS snapshot_date,
+        -- Moving 7-day average MTTR per contract
+        AVG(t.duration_hours) OVER (
+            PARTITION BY t.contract_id 
+            ORDER BY t.event_timestamp 
+            RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW
+        ) AS rolling_7d_avg_duration,
+        -- Cumulative event count per contract
+        SUM(t.event_occurred) OVER (
+            PARTITION BY t.contract_id 
+            ORDER BY t.event_timestamp 
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS cumulative_breaches_to_date
+    FROM sla_incident_telemetry t
+    INNER JOIN sla_contracts_master m ON t.contract_id = m.contract_id
 ),
-windowed_acceleration AS (
+aggregated_workload_metrics AS (
     SELECT
-        entity_id,
-        domain_cluster,
-        observation_day,
-        total_events_logged,
-        latest_event_at,
-        LAG(total_events_logged, 1) OVER (
-            PARTITION BY entity_id ORDER BY observation_day
-        ) AS previous_day_volume,
-        total_events_logged - COALESCE(LAG(total_events_logged, 1) OVER (
-            PARTITION BY entity_id ORDER BY observation_day
-        ), total_events_logged) AS volume_velocity,
-        AVG(total_events_logged) OVER (
-            PARTITION BY entity_id ORDER BY observation_day
-            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
-        ) AS rolling_7d_mean_volume,
-        NTILE(10) OVER (
-            PARTITION BY observation_day, domain_cluster
-            ORDER BY total_events_logged DESC
-        ) AS activity_decile
-    FROM daily_entity_slices
+        snapshot_date,
+        client_tier,
+        workload_type,
+        COUNT(DISTINCT contract_id) AS active_contracts_count,
+        COUNT(*) AS total_incidents_logged,
+        SUM(event_occurred) AS total_sla_breaches,
+        ROUND(AVG(system_load_ratio)::numeric, 3) AS avg_workload_load_ratio,
+        ROUND(AVG(rolling_7d_avg_duration)::numeric, 2) AS avg_rolling_7d_duration_hours,
+        ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_hours)::numeric, 2) AS p95_duration_hours,
+        ROUND((SUM(event_occurred)::numeric / NULLIF(COUNT(*), 0) * 100)::numeric, 2) AS empirical_breach_rate_pct
+    FROM telemetry_windowed
+    GROUP BY snapshot_date, client_tier, workload_type
 )
 SELECT
-    entity_id,
-    domain_cluster,
-    observation_day,
-    total_events_logged,
-    previous_day_volume,
-    volume_velocity,
-    ROUND(rolling_7d_mean_volume, 2) AS rolling_7d_mean_volume,
-    activity_decile,
-    CASE 
-        WHEN activity_decile = 1 THEN 'HIGH_PRIORITY_SURGE'
-        WHEN volume_velocity < 0 THEN 'CONTRACTION'
-        ELSE 'STABLE_EXPANSION'
-    END AS operational_health_tier,
-    CURRENT_TIMESTAMP AS mart_refreshed_at
-FROM windowed_acceleration;
+    snapshot_date,
+    client_tier,
+    workload_type,
+    active_contracts_count,
+    total_incidents_logged,
+    total_sla_breaches,
+    avg_workload_load_ratio,
+    avg_rolling_7d_duration_hours,
+    p95_duration_hours,
+    empirical_breach_rate_pct,
+    -- Rank workloads by severity within tier
+    DENSE_RANK() OVER (
+        PARTITION BY snapshot_date, client_tier 
+        ORDER BY empirical_breach_rate_pct DESC
+    ) AS tier_workload_risk_rank,
+    CURRENT_TIMESTAMP AS refreshed_at
+FROM aggregated_workload_metrics
+WITH DATA;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_idx_inetum_senior_data_scientist_bridge_project_rollup_day 
-    ON mv_inetum_senior_data_scientist_bridge_project_continuous_rollup (entity_id, observation_day);
+-- Unique Composite Index for Concurrent Materialized View Refresh
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sla_risk_rollup_unique
+    ON mv_sla_continuous_risk_rollup (snapshot_date, client_tier, workload_type);
 
-CREATE INDEX IF NOT EXISTS idx_inetum_senior_data_scientist_bridge_project_rollup_tier 
-    ON mv_inetum_senior_data_scientist_bridge_project_continuous_rollup (operational_health_tier, activity_decile);
-
-COMMENT ON MATERIALIZED VIEW mv_inetum_senior_data_scientist_bridge_project_continuous_rollup IS
-    'Concurrent statistical rollup mart. Refresh via: REFRESH MATERIALIZED VIEW CONCURRENTLY analytical_lakehouse.mv_inetum_senior_data_scientist_bridge_project_continuous_rollup;';
+-- Refresh Function
+CREATE OR REPLACE FUNCTION refresh_sla_risk_rollup()
+RETURNS VOID AS $$
+BEGIN
+    REFRESH MATERIALIZED VIEW CONCURRENTLY mv_sla_continuous_risk_rollup;
+END;
+$$ LANGUAGE plpgsql;
