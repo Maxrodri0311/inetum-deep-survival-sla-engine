@@ -1,0 +1,16 @@
+{
+  "project_id": "GP-038",
+  "project_name": "inetum_senior_data_scientist_bridge_project",
+  "repo_name": "inetum-finance-linear-optimization-engine",
+  "target_company": "Inetum",
+  "target_role": "Senior Data Scientist",
+  "paradigm": "DeliveryParadigm.C_LEVEL_EXECUTIVE_SUITE",
+  "core_algorithm": "AlgorithmFamily.LINEAR_PROGRAMMING",
+  "generated_at": "2026-10-01T16:56:35.812493+00:00",
+  "schema_version": "1.0",
+  "validation": {
+    "token_blacklist_check": "passed",
+    "ast_security_check": "passed",
+    "py_compile_check": "passed"
+  }
+}
